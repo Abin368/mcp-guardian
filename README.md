@@ -17,8 +17,16 @@ upstream tool does not run.
 The design and the security assumptions are in
 [docs/architecture.md](docs/architecture.md). A hands-on Claude Desktop
 checklist is in [docs/manual-claude-desktop.md](docs/manual-claude-desktop.md).
-That checklist has not been executed as part of the automated tests. Do not
-treat the project as Claude-Desktop-verified until you have run it.
+Manual testing was performed with Claude Desktop on Windows 11.
+Verified scenarios include:
+- Successful tool execution after Allow.
+- Tool execution prevented after Block.
+- Multiple tool calls.
+- Timeout with fail-closed behavior.
+- Upstream failure handling.
+
+These manual checks are separate from the automated test suite.
+See docs/manual-claude-desktop.md for the testing procedure.
 
 ## IPC in one paragraph
 
@@ -99,12 +107,12 @@ cancelled.
 Default approval mode is `deny-all` (every tool call is blocked). To ask the
 window:
 
-```bash
-python -m mcp_guardian.proxy ^
-  --server-name harmless-echo ^
-  --upstream-command .venv\Scripts\python.exe ^
-  --upstream-arg -m ^
-  --upstream-arg mcp_guardian.manual.echo_server ^
+```powershell
+python -m mcp_guardian.proxy `
+  --server-name harmless-echo `
+  --upstream-command .venv\Scripts\python.exe `
+  --upstream-arg=-m `
+  --upstream-arg=mcp_guardian.manual.echo_server `
   --approval ipc
 ```
 

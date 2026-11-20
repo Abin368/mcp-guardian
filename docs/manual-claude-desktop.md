@@ -1,8 +1,8 @@
 # Manual test on Windows 11 (Claude Desktop)
 
-This procedure is the human test for Phase 4. The automated suite does **not**
-launch Claude Desktop. Compatibility is not established until you complete
-these steps and see the results yourself.
+This document records manual integration testing of MCP Guardian with
+Claude Desktop on Windows 11. The automated test suite does not launch
+Claude Desktop, so these checks verify the integration separately.
 
 Use the harmless echo tool below. Do not start with a filesystem server, and
 do not point a server at your home directory.

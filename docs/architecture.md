@@ -180,9 +180,10 @@ Remaining limitations (be honest about these):
 - Very large argument objects are replaced with a fixed “omitted” placeholder
   rather than truncated, so a cut-off string cannot leak half of a secret.
   The reviewer then has less context.
-- Claude Desktop itself has not been part of the automated tests. See
-  `docs/manual-claude-desktop.md`. Do not claim that compatibility until that
-  procedure has been run.
+- Claude Desktop is not covered by the automated test suite. Manual testing
+  was performed on Windows 11, covering Allow, Block, multiple tool calls,
+  timeout, and upstream failure handling. See
+  docs/manual-claude-desktop.md for the manual test procedure.
 - There is still no remote / Claude Web gateway.
 
 ## How a popup stays responsive
