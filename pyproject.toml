@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-guardian"
+version = "0.1.0"
+description = "MCP Guardian — human-in-the-loop approval for MCP tool calls"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3",
+]
+
+[project.optional-dependencies]
+ui = [
+    "PySide6>=6.8",
+    "qasync>=0.27",
+]
+proxy = [
+    "mcp>=2.3",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "PySide6>=6.8",
+    "qasync>=0.27",
+    "mcp>=2.3",
+]
+
+[project.scripts]
+mcp-guardian-ui = "mcp_guardian.presentation.__main__:main"
+mcp-guardian-proxy = "mcp_guardian.proxy.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
