@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,6 +34,7 @@ from mcp_guardian.ipc.protocol import (
 from mcp_guardian.ipc.server import ApprovalIpcServer
 from mcp_guardian.presentation.redaction import REDACTED
 from mcp_guardian.proxy.ipc_approval import IpcApprovalProvider, ui_budget_seconds
+from mcp_guardian.proxy.logging_config import configure_proxy_logging
 from mcp_guardian.proxy.proxy import GuardianProxy
 from tests.proxy.fake_upstream import ExecutionCounter, make_fake_upstream
 
@@ -229,6 +231,124 @@ async def test_ui_disconnect_never_executes_upstream() -> None:
 
     assert result.is_error is True
     assert counter.calls == 0
+
+
+def _drop_proxy_ipc_socket(provider: IpcApprovalProvider) -> None:
+    """Abort the proxy's approval socket without asking the UI to close."""
+    writer = provider._client._writer
+    assert writer is not None
+    transport = writer.transport
+    assert transport is not None
+    transport.abort()
+
+
+@pytest.mark.asyncio
+async def test_proxy_ipc_socket_drop_never_executes_upstream() -> None:
+    started = asyncio.Event()
+
+    async def handler(notice: ApprovalNotice) -> DecisionNotice:
+        started.set()
+        await asyncio.Event().wait()
+        return DecisionNotice(notice.request_id, "approve", "ui_allow")
+
+    async with _proxied(handler, timeout=5) as (
+        client,
+        counter,
+        _server,
+        coordinator,
+        provider,
+        _endpoint,
+    ):
+        call = asyncio.create_task(client.call_tool("echo", {"message": "dropped"}))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        _drop_proxy_ipc_socket(provider)
+        result = await asyncio.wait_for(call, timeout=5)
+        slots = list(coordinator._slots.values())
+
+    assert result.is_error is True
+    assert counter.calls == 0
+    assert len(slots) == 1
+    assert slots[0].request.state is RequestState.CANCELLED
+    assert slots[0].request.decision is not None
+    assert slots[0].request.decision.allows_execution is False
+
+
+@pytest.mark.asyncio
+async def test_two_pending_requests_fail_closed_when_ipc_disconnects() -> None:
+    both_pending = asyncio.Event()
+    seen: list[str] = []
+
+    async def handler(notice: ApprovalNotice) -> DecisionNotice:
+        seen.append(notice.request_id)
+        if len(seen) >= 2:
+            both_pending.set()
+        await asyncio.Event().wait()
+        return DecisionNotice(notice.request_id, "approve", "ui_allow")
+
+    async with _proxied(handler, timeout=5) as (client, counter, server, coordinator, *_rest):
+        assert server is not None
+        first = asyncio.create_task(client.call_tool("echo", {"message": "one"}))
+        second = asyncio.create_task(client.call_tool("fail", {"reason": "two"}))
+        await asyncio.wait_for(both_pending.wait(), timeout=2)
+        await server.close()
+        first_result, second_result = await asyncio.wait_for(
+            asyncio.gather(first, second),
+            timeout=5,
+        )
+        states = [slot.request.state for slot in coordinator._slots.values()]
+        decisions = [slot.request.decision for slot in coordinator._slots.values()]
+
+    assert first_result.is_error is True
+    assert second_result.is_error is True
+    assert counter.calls == 0
+    assert len(states) == 2
+    assert states == [RequestState.CANCELLED, RequestState.CANCELLED]
+    assert all(decision is not None and decision.allows_execution is False for decision in decisions)
+
+
+@pytest.mark.asyncio
+async def test_approved_call_stderr_omits_secret_arguments(capsys: pytest.CaptureFixture[str]) -> None:
+    password = "pw-do-not-log"
+
+    async def handler(notice: ApprovalNotice) -> DecisionNotice:
+        return DecisionNotice(notice.request_id, "approve", "ui_allow")
+
+    proxy_logger = logging.getLogger("mcp_guardian.proxy")
+    previous_handlers = list(proxy_logger.handlers)
+    previous_level = proxy_logger.level
+    previous_propagate = proxy_logger.propagate
+    configure_proxy_logging(logging.INFO)
+    try:
+        async with _proxied(handler) as (client, counter, *_rest):
+            result = await asyncio.wait_for(
+                client.call_tool(
+                    "echo",
+                    {
+                        "message": "hello",
+                        "api_key": SECRET,
+                        "nested": {"password": password, "token": SECRET},
+                    },
+                ),
+                timeout=5,
+            )
+        captured = capsys.readouterr()
+    finally:
+        current_handlers = list(proxy_logger.handlers)
+        proxy_logger.handlers.clear()
+        for stream_handler in current_handlers:
+            if stream_handler not in previous_handlers:
+                stream_handler.close()
+        for stream_handler in previous_handlers:
+            proxy_logger.addHandler(stream_handler)
+        proxy_logger.setLevel(previous_level)
+        proxy_logger.propagate = previous_propagate
+
+    assert result.is_error is False
+    assert "echo:hello" in _text(result)
+    assert counter.calls == 1
+    assert SECRET not in captured.err
+    assert password not in captured.err
+    assert "decision=approve" in captured.err
 
 
 @pytest.mark.asyncio

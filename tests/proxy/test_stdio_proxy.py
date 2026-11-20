@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
+import mcp_types as types
 import pytest
 from mcp import Client
+from mcp.server.context import ServerRequestContext
+from mcp.server.lowlevel import Server
+from mcp_types.methods import serialize_server_result
 
 from mcp_guardian.application.pending_coordinator import PendingRequestCoordinator
 from mcp_guardian.domain.models import ApprovalRequest, DecisionAction
@@ -14,7 +19,7 @@ from mcp_guardian.proxy.approval_provider import (
     make_deny_all_provider,
     make_scripted_provider,
 )
-from mcp_guardian.proxy.proxy import GuardianProxy
+from mcp_guardian.proxy.proxy import GuardianProxy, _tool_result_for_client
 from tests.proxy.fake_upstream import ExecutionCounter, make_fake_upstream
 
 
@@ -241,6 +246,118 @@ async def test_proxy_shuts_down_cleanly(
         assert pending == []
 
     # Exiting the stack also closes clients; should not raise.
+
+
+@pytest.mark.asyncio
+async def test_upstream_meta_is_stripped_from_tool_result(
+    coordinator: PendingRequestCoordinator,
+) -> None:
+    """Upstream ``_meta`` must not reach the downstream client.
+
+    Content, isError, and structuredContent are the tool payload and stay.
+    """
+    upstream_meta = {
+        "upstreamMarker": "do-not-forward",
+        "io.modelcontextprotocol/serverInfo": {
+            "name": "leaky-upstream",
+            "version": "9.9.9",
+        },
+    }
+
+    async def on_list_tools(
+        ctx: ServerRequestContext[Any],
+        params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name="marked",
+                    description="Returns a payload plus upstream metadata",
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            ]
+        )
+
+    async def on_call_tool(
+        ctx: ServerRequestContext[Any],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="kept-text")],
+            isError=True,
+            structuredContent={"kept": "value"},
+            meta=upstream_meta,
+        )
+
+    upstream_server = Server(
+        "leaky-upstream",
+        version="9.9.9",
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+    )
+    async with Client(upstream_server) as upstream:
+        proxy = GuardianProxy(
+            upstream=upstream,
+            approval=make_allow_all_provider(coordinator),
+            server_name="leaky-upstream",
+            approval_timeout=5.0,
+            coordinator=coordinator,
+        )
+        async with Client(proxy.build_server()) as client:
+            result = await client.call_tool("marked", {})
+
+    assert result.is_error is True
+    assert result.content[0].text == "kept-text"  # type: ignore[union-attr]
+    assert result.structured_content == {"kept": "value"}
+    meta = dict(result.meta or {})
+    assert "upstreamMarker" not in meta
+    assert "do-not-forward" not in str(meta)
+    server_info = meta.get("io.modelcontextprotocol/serverInfo")
+    if isinstance(server_info, dict):
+        assert server_info.get("name") != "leaky-upstream"
+
+
+def test_2025_call_tool_result_omits_upstream_meta() -> None:
+    """A 2025-11-25 wire result keeps the tool payload and drops upstream ``_meta``.
+
+    The 2025 schema allows ``_meta``, so version sieving alone would forward it.
+    """
+    upstream_meta = {
+        "upstreamMarker": "do-not-forward",
+        "io.modelcontextprotocol/serverInfo": {
+            "name": "leaky-upstream",
+            "version": "9.9.9",
+        },
+    }
+    upstream = types.CallToolResult(
+        content=[types.TextContent(type="text", text="kept-text")],
+        isError=True,
+        structuredContent={"kept": "value"},
+        meta=upstream_meta,
+    )
+    leaky = serialize_server_result(
+        "tools/call",
+        "2025-11-25",
+        upstream.model_dump(by_alias=True, mode="json", exclude_none=True),
+    )
+    wire = serialize_server_result(
+        "tools/call",
+        "2025-11-25",
+        _tool_result_for_client(upstream).model_dump(
+            by_alias=True,
+            mode="json",
+            exclude_none=True,
+        ),
+    )
+
+    assert leaky["_meta"]["upstreamMarker"] == "do-not-forward"
+    assert "_meta" not in wire
+    assert wire["isError"] is True
+    assert wire["structuredContent"] == {"kept": "value"}
+    assert wire["content"][0]["type"] == "text"
+    assert wire["content"][0]["text"] == "kept-text"
+    assert "do-not-forward" not in str(wire)
+    assert "leaky-upstream" not in str(wire)
 
 
 @pytest.mark.asyncio

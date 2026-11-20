@@ -167,5 +167,5 @@ tests/
 | Fail-closed coordinator and state machine | Remote / Claude Web gateway |
 | PySide6 dialogs, one per request ID | Editing Claude Desktop's config for you |
 | Redaction of obvious secret **names** | Redaction of secrets hidden in ordinary fields |
-| STDIO proxy for one upstream server | A claim that Claude Desktop was tested here |
+| STDIO proxy for one upstream server, manually checked with Claude Desktop on Windows 11 | Claude on the web, or a filesystem server |
 | Loopback IPC with a per-launch token | Protection from malware running as your user |

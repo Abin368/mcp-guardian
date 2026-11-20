@@ -172,9 +172,11 @@ class GuardianProxy:
             decision=outcome.decision.action.value,
         )
 
-        # Preserve upstream tool results and tool-level errors as-is.
+        # Forward the tool payload only. Upstream ``_meta`` is session
+        # metadata (including a newer protocol's serverInfo stamp) and must
+        # not be written to the downstream client.
         try:
-            return await self._upstream.call_tool(tool_name, arguments)
+            upstream_result = await self._upstream.call_tool(tool_name, arguments)
         except MCPError:
             raise
         except Exception as exc:
@@ -196,6 +198,23 @@ class GuardianProxy:
                 ],
                 isError=True,
             )
+        return _tool_result_for_client(upstream_result)
+
+
+def _tool_result_for_client(upstream: types.CallToolResult) -> types.CallToolResult:
+    """Rebuild a tool result from the payload fields this SDK supports.
+
+    ``content``, ``isError``, and ``structuredContent`` (when the model has
+    it) are copied. Upstream ``_meta`` is left behind.
+    """
+    fields = types.CallToolResult.model_fields
+    payload: dict[str, Any] = {"content": upstream.content}
+    if "is_error" in fields:
+        payload["isError"] = upstream.is_error
+    if "structured_content" in fields:
+        payload["structuredContent"] = upstream.structured_content
+    return types.CallToolResult(**payload)
+
 
 def _correlation(ctx: ServerRequestContext[Any]) -> str | None:
     if ctx.request_id is None:
