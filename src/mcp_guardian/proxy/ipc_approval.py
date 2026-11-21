@@ -92,6 +92,7 @@ class IpcApprovalProvider:
         arguments: Mapping[str, Any],
         correlation_id: str | None = None,
         timeout: float | None = None,
+        client_disconnect: asyncio.Event | None = None,
     ) -> WaitOutcome:
         request = await self.coordinator.create_request(
             server_name=server_name,
@@ -124,12 +125,29 @@ class IpcApprovalProvider:
             self._ipc_hook(request, float(wait_timeout)),
             name=f"ipc-approval-{request.request_id}",
         )
+        watcher: asyncio.Task[None] | None = None
+        if client_disconnect is not None:
+            watcher = asyncio.create_task(
+                self._cancel_on_disconnect(client_disconnect, request.request_id),
+                name=f"ipc-disconnect-{request.request_id}",
+            )
         try:
             outcome = await self.coordinator.wait_for_decision(
                 request.request_id,
                 timeout=float(wait_timeout),
             )
+        except asyncio.CancelledError:
+            # Modern Streamable HTTP cancels the handler on disconnect. The
+            # wait is shielded, so cancel the slot explicitly or it stays PENDING.
+            await self._shielded_cancel(request.request_id, "client_disconnect")
+            raise
         finally:
+            if watcher is not None and not watcher.done():
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
             if not hook.done():
                 hook.cancel()
             try:
@@ -148,6 +166,27 @@ class IpcApprovalProvider:
 
         self._log_resolved(request, correlation_id, outcome)
         return outcome
+
+    async def _cancel_on_disconnect(
+        self,
+        disconnect: asyncio.Event,
+        request_id: str,
+    ) -> None:
+        """Stateful HTTP path: closing the POST does not cancel the session task."""
+        await disconnect.wait()
+        await self._shielded_cancel(request_id, "client_disconnect")
+
+    async def _shielded_cancel(self, request_id: str, reason: str) -> None:
+        """Cancel one slot even when the calling task is already cancelling."""
+        cleanup = asyncio.create_task(
+            self._apply(request_id, ACTION_CANCEL, reason),
+            name=f"approval-cancel-{request_id}",
+        )
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise
 
     async def _ipc_hook(self, request: ApprovalRequest, timeout: float) -> None:
         try:
@@ -170,6 +209,9 @@ class IpcApprovalProvider:
         try:
             decision = await self._client.request_decision(notice)
         except asyncio.CancelledError:
+            # Dropping the IPC waiter dismisses a late Allow into ignored. The
+            # coordinator cancel is shielded so a PENDING slot cannot linger.
+            await self._shielded_cancel(request.request_id, "client_disconnect")
             raise
         except IpcDisconnected:
             await self._apply(request.request_id, ACTION_CANCEL, "ui_disconnected")
@@ -188,6 +230,7 @@ class IpcApprovalProvider:
 
         task = asyncio.current_task()
         if task is not None and task.cancelling():
+            await self._shielded_cancel(request.request_id, "client_disconnect")
             raise asyncio.CancelledError()
 
         action = action_to_apply(request.request_id, decision)
@@ -209,6 +252,18 @@ class IpcApprovalProvider:
         except (DuplicateDecisionError, RequestNotFoundError):
             return
         except asyncio.CancelledError:
+            # A cancel that was interrupted mid-flight must still fail closed.
+            try:
+                current = await self.coordinator.get_request(request_id)
+            except RequestNotFoundError:
+                raise
+            if current.state is RequestState.PENDING:
+                try:
+                    await asyncio.shield(
+                        self.coordinator.cancel(request_id, reason="apply_cancelled")
+                    )
+                except (DuplicateDecisionError, RequestNotFoundError, asyncio.CancelledError):
+                    pass
             raise
         except Exception as exc:
             logger.error(

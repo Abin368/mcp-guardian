@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from mcp_guardian.application.pending_coordinator import (
+    DuplicateDecisionError,
     PendingRequestCoordinator,
+    RequestNotFoundError,
     WaitOutcome,
 )
 from mcp_guardian.domain.models import ApprovalRequest, Decision, DecisionAction
@@ -40,6 +42,7 @@ class ApprovalProvider(Protocol):
         arguments: Mapping[str, Any],
         correlation_id: str | None = None,
         timeout: float | None = None,
+        client_disconnect: asyncio.Event | None = None,
     ) -> WaitOutcome:
         """Return a WaitOutcome. Execution is allowed only if allows_execution."""
 
@@ -69,6 +72,7 @@ class CoordinatorApprovalProvider:
         arguments: Mapping[str, Any],
         correlation_id: str | None = None,
         timeout: float | None = None,
+        client_disconnect: asyncio.Event | None = None,
     ) -> WaitOutcome:
         # Arguments are stored on the request for the decision-maker; never logged.
         request = await self.coordinator.create_request(
@@ -91,12 +95,27 @@ class CoordinatorApprovalProvider:
             self._run_hook(request),
             name=f"approval-hook-{request.request_id}",
         )
+        watcher: asyncio.Task[None] | None = None
+        if client_disconnect is not None:
+            watcher = asyncio.create_task(
+                self._cancel_on_disconnect(client_disconnect, request.request_id),
+                name=f"approval-disconnect-{request.request_id}",
+            )
         try:
             outcome = await self.coordinator.wait_for_decision(
                 request.request_id,
                 timeout=wait_timeout,
             )
+        except asyncio.CancelledError:
+            await self._shielded_cancel(request.request_id, "client_disconnect")
+            raise
         finally:
+            if watcher is not None and not watcher.done():
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
             if not hook_task.done():
                 hook_task.cancel()
                 try:
@@ -116,10 +135,33 @@ class CoordinatorApprovalProvider:
         )
         return outcome
 
+    async def _cancel_on_disconnect(
+        self,
+        disconnect: asyncio.Event,
+        request_id: str,
+    ) -> None:
+        await disconnect.wait()
+        await self._shielded_cancel(request_id, "client_disconnect")
+
+    async def _shielded_cancel(self, request_id: str, reason: str) -> None:
+        async def _do() -> None:
+            try:
+                await self.coordinator.cancel(request_id, reason=reason)
+            except (DuplicateDecisionError, RequestNotFoundError):
+                return
+
+        cleanup = asyncio.create_task(_do(), name=f"approval-cancel-{request_id}")
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise
+
     async def _run_hook(self, request: ApprovalRequest) -> None:
         try:
             await self.decision_hook(request)
         except asyncio.CancelledError:
+            await self._shielded_cancel(request.request_id, "client_disconnect")
             raise
         except Exception:
             logger.exception(

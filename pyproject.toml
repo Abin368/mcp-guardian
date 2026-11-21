@@ -31,6 +31,7 @@ dev = [
 [project.scripts]
 mcp-guardian-ui = "mcp_guardian.presentation.__main__:main"
 mcp-guardian-proxy = "mcp_guardian.proxy.__main__:main"
+mcp-guardian-gateway = "mcp_guardian.gateway.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

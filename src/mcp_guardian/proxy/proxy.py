@@ -17,6 +17,7 @@ from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.shared.exceptions import MCPError
 
+from mcp_guardian.application.client_disconnect import disconnect_event_from_request
 from mcp_guardian.application.pending_coordinator import PendingRequestCoordinator
 from mcp_guardian.proxy.approval_provider import (
     ApprovalProvider,
@@ -137,6 +138,7 @@ class GuardianProxy:
             arguments=arguments,
             correlation_id=correlation_id,
             timeout=self._approval_timeout,
+            client_disconnect=disconnect_event_from_request(ctx.request),
         )
 
         if not outcome.allows_execution:
